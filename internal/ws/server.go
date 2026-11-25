@@ -27,14 +27,14 @@ const (
 // Server 是挂在 gateway 上的 WebSocket 处理器：
 // 先做 token 鉴权，再升级连接，然后启动读写泵并注册到连接表。
 type Server struct {
-	upgrader     websocket.Upgrader
-	sessions     *session.Manager
-	registry     *Registry
-	router       *Router
-	pingInterval time.Duration
-	pongTimeout  time.Duration
-	now          func() time.Time
-	newTicker    func(time.Duration) Ticker
+	upgrader     websocket.Upgrader         // 将 HTTP 连接升级为 WebSocket 的升级器，当前允许任意 Origin
+	sessions     *session.Manager           // 1.3 的 token 校验，升级前必须先鉴权
+	registry     *Registry                  // 在线连接表，按 playerID 去重
+	router       *Router                    // 把解码后的消息分发到 lobby/room
+	pingInterval time.Duration              // 写泵发 ping 的周期
+	pongTimeout  time.Duration              // 超过该时长没收到 pong 就踢连接
+	now          func() time.Time           // 可注入时钟，便于测试心跳超时
+	newTicker    func(time.Duration) Ticker // 可注入 ticker 工厂，避免测试等真实时间
 }
 
 // ServerOption 用来覆盖 Server 的默认行为，测试主要靠它注入假时钟和假 ticker。
@@ -122,21 +122,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // outbound 是写泵统一的出站消息：可以是文本帧、二进制帧，也可以是 ping/pong 控制帧。
 type outbound struct {
-	kind int
-	data []byte
+	kind int    // WebSocket 消息类型：文本帧/二进制帧/pong 等控制帧
+	data []byte // 帧负载，控制帧可能为空
 }
 
 // Conn 封装一条 WebSocket 连接。读泵只负责读和路由，写泵只负责所有写出，避免并发写冲突。
 type Conn struct {
-	ws       *websocket.Conn
-	playerID string
-	registry *Registry
-	router   *Router
-	hb       *Heartbeat
-	ticker   Ticker
-	send     chan outbound
-	done     chan struct{}
-	once     sync.Once
+	ws       *websocket.Conn // 底层 WebSocket 连接
+	playerID string          // 连接绑定的已鉴权玩家 ID
+	registry *Registry       // 所属在线连接表，关闭时由读泵注销
+	router   *Router         // 消息分发器
+	hb       *Heartbeat      // 本连接的心跳状态
+	ticker   Ticker          // 写泵定时发 ping 用的定时器
+	send     chan outbound   // 写泵的出站队列，所有写出只由写泵执行
+	done     chan struct{}   // 关闭信号，通知读写泵退出
+	once     sync.Once       // 保证 Close 只真正执行一次
 }
 
 func newConn(ws *websocket.Conn, playerID string, registry *Registry, router *Router,

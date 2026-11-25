@@ -13,7 +13,7 @@ type Ticker interface {
 
 // realTicker 把标准库 time.Ticker 包装成 Ticker 接口。
 type realTicker struct {
-	t *time.Ticker
+	t *time.Ticker // 被包装的标准库定时器
 }
 
 func (r realTicker) C() <-chan time.Time { return r.t.C }
@@ -22,10 +22,10 @@ func (r realTicker) Stop()               { r.t.Stop() }
 // Heartbeat 记录最后一次收到 pong 的时间。
 // 超时判定不依赖具体连接实现，测试可以注入假时钟精确踩边界。
 type Heartbeat struct {
-	mu      sync.Mutex
-	now     func() time.Time
-	timeout time.Duration
-	last    time.Time
+	mu      sync.Mutex       // 保护 now/timeout/last 的并发读写
+	now     func() time.Time // 可注入时钟，便于测试踩超时边界
+	timeout time.Duration    // 超过该时长未收到 pong 视为掉线
+	last    time.Time        // 最后一次收到 pong 的时间
 }
 
 // NewHeartbeat 创建心跳状态，初始时间取当前时间。

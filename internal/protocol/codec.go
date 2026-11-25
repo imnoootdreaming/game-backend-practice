@@ -95,7 +95,7 @@ func Decode(frame []byte) (Message, error) { return JSONCodec{}.Decode(frame) }
 
 // Encoder 把消息写入 io.Writer，供 TCP 连接或 WebSocket 连接直接使用。
 type Encoder struct {
-	w io.Writer
+	w io.Writer // 帧写出的目标，通常是网络连接
 }
 
 // NewEncoder 基于一个 io.Writer 创建流式编码器。
@@ -114,8 +114,8 @@ func (e *Encoder) Encode(msg Message) error {
 // Decoder 从 io.Reader 逐帧读消息，内部缓存还没读满的字节，
 // 因此天然处理 TCP/WebSocket 的粘包（一次读多帧）和拆包（一帧分多次读）。
 type Decoder struct {
-	r   io.Reader
-	buf []byte // 已读出但尚未组成完整帧的字节
+	r   io.Reader // 帧读取的来源，通常是网络连接
+	buf []byte    // 已读出但尚未组成完整帧的字节
 }
 
 // NewDecoder 基于一个 io.Reader 创建流式解码器。

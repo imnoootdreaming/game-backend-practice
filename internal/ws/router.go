@@ -29,9 +29,9 @@ var noopHandler Handler = HandlerFunc(func(_ context.Context, _ *Conn, msg proto
 // Router 按消息类型把流量分到 lobby / room / fallback 三条路径。
 // 连接层只依赖这个接口，后面加新消息不需要改读写泵。
 type Router struct {
-	lobby    Handler
-	room     Handler
-	fallback Handler
+	lobby    Handler // 处理登录/大厅类消息
+	room     Handler // 处理输入/快照/结算类消息
+	fallback Handler // 处理未识别消息，兜底避免 nil panic
 }
 
 // NewRouter 创建路由器，未显式提供的处理器用 noopHandler 兜底，避免 nil panic。

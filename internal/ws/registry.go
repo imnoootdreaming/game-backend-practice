@@ -13,11 +13,11 @@ type Peer interface {
 	Close() error
 }
 
-// Registry 是 playerID → 连接的并发安全注册表。
+// Registry 是 Map<playerID, 连接> 的并发安全注册表。
 // 同一 playerID 只允许一条连接在线，避免两条连接同时改权威状态时互相覆盖。
 type Registry struct {
-	mu    sync.RWMutex
-	peers map[string]Peer
+	mu    sync.RWMutex    // 保护 peers 的并发读写
+	peers map[string]Peer // Map<playerID, 连接>，保证一人一条在线连接
 }
 
 // NewRegistry 创建空注册表。

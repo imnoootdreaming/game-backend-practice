@@ -45,7 +45,7 @@ type SessionConfig struct {
 }
 
 // Load 读取配置文件并做三层处理：
-// 1. 读文件 → 2. 先填默认值，再用文件内容覆盖 → 3. 校验合法性
+// 1. 读文件；2. 先填默认值，再用文件内容覆盖；3. 校验合法性
 // 任何一步失败都返回错误，调用方据此决定"拒绝启动"。
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)

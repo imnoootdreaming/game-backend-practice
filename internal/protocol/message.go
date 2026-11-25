@@ -31,8 +31,8 @@ const (
 // Payload 用 RawMessage 而不是 interface{}，是为了先读出 type，再按注册表解成正确的结构体；
 // 如果直接解成 map，后续还要再编码一次，既慢又容易丢字段类型（如 uint64 精度）。
 type Envelope struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Type    string          `json:"type"`    // 消息类型名，决定 Payload 按哪个结构体解码
+	Payload json.RawMessage `json:"payload"` // 业务字段的原始 JSON，解码时再按 Type 还原
 }
 
 // registry 是类型名到构造函数的映射。
@@ -84,8 +84,8 @@ func (LoginResp) Type() string { return TypeLoginResp }
 
 // ReadyReq 是大厅准备状态变更。Ready=true 准备，false 取消准备。
 type ReadyReq struct {
-	PlayerID string `json:"player_id"`
-	Ready    bool   `json:"ready"`
+	PlayerID string `json:"player_id"` // 请求玩家（服务端以连接身份为准，不信任此字段）
+	Ready    bool   `json:"ready"`     // true 准备，false 取消准备
 }
 
 func (ReadyReq) Type() string { return TypeReadyReq }
@@ -121,7 +121,7 @@ func (RoomAssign) Type() string { return TypeRoomAssign }
 // InputCmd 是客户端输入命令。注意没有 X/Y 字段：位置只由服务端 tick 计算，
 // 客户端伪造坐标对权威状态无效（阶段 1.7 验收标准）。
 type InputCmd struct {
-	PlayerID  string  `json:"player_id"`
+	PlayerID  string  `json:"player_id"` // 命令发出者（服务端以连接身份为准）
 	Seq       uint64  `json:"seq"`       // 命令序列号，用于丢弃重复/乱序输入（2.1 使用）
 	MoveX     float32 `json:"move_x"`    // 本帧水平移动量
 	MoveY     float32 `json:"move_y"`    // 本帧垂直移动量
@@ -134,29 +134,29 @@ func (InputCmd) Type() string { return TypeInputCmd }
 // PlayerState 是快照中单个玩家的状态。LastSeq 是服务端已应用的最后一条命令序列号，
 // 客户端据此重放尚未确认的输入（2.2 预测与和解）。
 type PlayerState struct {
-	ID      string  `json:"id"`
-	X       float32 `json:"x"`
-	Y       float32 `json:"y"`
-	HP      int32   `json:"hp"`
-	LastSeq uint64  `json:"last_seq"`
+	ID      string  `json:"id"`       // 玩家 ID
+	X       float32 `json:"x"`        // 服务器权威计算出的 X 坐标
+	Y       float32 `json:"y"`        // 服务器权威计算出的 Y 坐标
+	HP      int32   `json:"hp"`       // 当前血量
+	LastSeq uint64  `json:"last_seq"` // 服务端已应用的最后一条命令序列号
 }
 
 // Snapshot 是服务器广播的权威状态快照。Tick 单调递增，客户端据此丢弃乱序快照。
 type Snapshot struct {
-	RoomID  string        `json:"room_id"`
-	Tick    uint64        `json:"tick"`
-	Players []PlayerState `json:"players"`
+	RoomID  string        `json:"room_id"` // 快照所属房间
+	Tick    uint64        `json:"tick"`    // 单调递增的逻辑帧号，客户端据此丢弃乱序快照
+	Players []PlayerState `json:"players"` // 房间内全部玩家的权威状态
 }
 
 func (Snapshot) Type() string { return TypeSnapshot }
 
 // GameResult 是对局结算战绩。RequestID 是幂等键，阶段 2.6 用它防止重复发奖。
 type GameResult struct {
-	RoomID    string           `json:"room_id"`
+	RoomID    string           `json:"room_id"`    // 对局所在房间
 	RequestID string           `json:"request_id"` // 同一局结算重试必须带上同一个值
-	WinnerID  string           `json:"winner_id"`
-	Scores    map[string]int32 `json:"scores"`   // playerID → 击杀数/积分
-	EndedAt   int64            `json:"ended_at"` // Unix 秒
+	WinnerID  string           `json:"winner_id"`  // 获胜玩家 ID
+	Scores    map[string]int32 `json:"scores"`     // Map<playerID, 击杀数/积分>
+	EndedAt   int64            `json:"ended_at"`   // Unix 秒
 }
 
 func (GameResult) Type() string { return TypeGameResult }

@@ -19,20 +19,20 @@ const (
 
 // Session 是一条已登录会话。Token 用于对端后续请求的鉴权，ExpiresAt 同时受 token 和会话表约束。
 type Session struct {
-	PlayerID  string    `json:"player_id"`
-	Token     string    `json:"token"`
-	IssuedAt  time.Time `json:"issued_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	PlayerID  string    `json:"player_id"`  // 会话所属玩家
+	Token     string    `json:"token"`      // 当前有效令牌，重新登录会被覆盖
+	IssuedAt  time.Time `json:"issued_at"`  // 签发时间
+	ExpiresAt time.Time `json:"expires_at"` // 过期时间，同时受 token 和会话表约束
 }
 
 // Manager 把 token 编解码和会话表收在一起。
 // secret 是 HMAC 密钥，生产环境应从配置/密钥管理系统注入，不能硬编码进代码。
 type Manager struct {
-	secret   []byte
-	ttl      time.Duration
-	now      func() time.Time // 注入时钟，便于测试精确控制过期边界
-	mu       sync.RWMutex     // 保护 sessions
-	sessions map[string]*Session
+	secret   []byte              // HMAC 签名密钥，构造时拷贝避免外部改写
+	ttl      time.Duration       // 会话有效期，签发时据此算出 ExpiresAt
+	now      func() time.Time    // 注入时钟，便于测试精确控制过期边界
+	mu       sync.RWMutex        // 保护 sessions
+	sessions map[string]*Session // Map<playerID, 当前有效会话>
 }
 
 // NewManager 构造会话管理器。空密钥或非法 TTL 会让 token 可被伪造或永远不会过期，必须拒绝。

@@ -12,6 +12,7 @@ import (
 	"syscall"   // 定义 SIGINT / SIGTERM 等信号常量
 
 	"game-backend-practice/internal/config"  // 本项目自己的配置加载包
+	"game-backend-practice/internal/lobby"   // 1.5 的大厅服务（状态机 + 组队）
 	"game-backend-practice/internal/session" // 1.3 的 token 与会话表
 	"game-backend-practice/internal/ws"      // 1.4 的 WebSocket 接入层
 )
@@ -32,8 +33,8 @@ func newHandler(wsServer *ws.Server) http.Handler {
 	return mux
 }
 
-// main 是程序入口。启动流程：
-// 1. 解析命令行参数 → 2. 加载配置 → 3. 设置日志 → 4. 启动 HTTP 服务 → 5. 等退出信号并优雅关闭
+// main 是程序入口。启动流程依次为：
+// 1. 解析命令行参数；2. 加载配置；3. 设置日志；4. 启动 HTTP 服务；5. 等退出信号并优雅关闭
 func main() {
 	// -config 允许指定配置文件路径，默认是 configs/config.yaml
 	configPath := flag.String("config", "configs/config.yaml", "path to YAML config file")
@@ -55,13 +56,20 @@ func main() {
 	// 设置为全局默认 logger，后面所有 slog.Info/Error 都按这个级别输出
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: &levelVar})))
 
-	// 会话管理器负责 token 签发与校验；1.5/1.7 实现后把 Router 的占位处理器换成真实大厅/房间处理器
+	// 会话管理器负责 token 签发与校验
 	sessions, err := session.NewManager([]byte(cfg.Session.Secret), cfg.Session.TokenTTL)
 	if err != nil {
 		slog.Error("create session manager failed", "err", err)
 		os.Exit(1)
 	}
-	wsServer := ws.NewServer(sessions, ws.NewRouter(nil, nil))
+
+	// 1.5 大厅服务：玩家状态机 + 组队；房间处理器等 1.7 才接入，暂时用 nil 兜底
+	lobbyManager, err := lobby.NewManager(cfg.Game.TeamSize)
+	if err != nil {
+		slog.Error("create lobby manager failed", "err", err)
+		os.Exit(1)
+	}
+	wsServer := ws.NewServer(sessions, ws.NewRouter(lobby.NewHandler(lobbyManager), nil))
 
 	// 组装 HTTP 服务器：监听地址、路由、请求头超时都来自配置文件
 	srv := &http.Server{
