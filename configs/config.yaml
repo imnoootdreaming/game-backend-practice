@@ -1,0 +1,14 @@
+# 服务器监听设置
+server:
+  addr: ":8080"              # 监听 8080 端口；":8080" 表示接受所有网卡的连接
+  read_header_timeout: 5s    # 读取 HTTP 请求头最多等 5 秒，防止慢连接白占资源
+  shutdown_timeout: 5s       # 收到退出信号后，最多等 5 秒让手上的请求处理完再退出
+
+# 日志设置
+log:
+  level: "info"              # 日志级别：debug/info/warn/error，低于此级别的不打印
+
+# 游戏逻辑参数（后续阶段使用）
+game:
+  tick_hz: 20                # 服务器每秒推进 20 次游戏世界（约 50ms 一帧）
+  team_size: 4               # 一局游戏凑够 4 人开始

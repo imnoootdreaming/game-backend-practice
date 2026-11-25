@@ -1,3 +1,7 @@
+# Git 忽略清单：这里列出的文件不会被提交到仓库
+# Windows 下 go build 生成的可执行文件（体积大、每台机器要重新编译）
 *.exe
+# go test -c 生成的测试二进制文件
 *.test
+# go test -cover 生成的覆盖率报告文件
 *.out
