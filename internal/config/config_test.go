@@ -30,6 +30,9 @@ log:
 game:
   tick_hz: 30
   team_size: 10
+session:
+  secret: "unit-secret"
+  token_ttl: 45m
 `)
 
 	cfg, err := Load(path)
@@ -53,6 +56,12 @@ game:
 	}
 	if cfg.Game.TeamSize != 10 {
 		t.Errorf("Game.TeamSize = %d, want 10", cfg.Game.TeamSize)
+	}
+	if cfg.Session.Secret != "unit-secret" {
+		t.Errorf("Session.Secret = %q, want unit-secret", cfg.Session.Secret)
+	}
+	if cfg.Session.TokenTTL != 45*time.Minute {
+		t.Errorf("Session.TokenTTL = %v, want 45m", cfg.Session.TokenTTL)
 	}
 }
 
@@ -82,6 +91,12 @@ func TestLoadAppliesDefaultsForMissingFields(t *testing.T) {
 	if cfg.Game.TeamSize != 4 {
 		t.Errorf("Game.TeamSize = %d, want 4", cfg.Game.TeamSize)
 	}
+	if cfg.Session.Secret != "dev-only-change-me" {
+		t.Errorf("Session.Secret = %q, want dev-only-change-me", cfg.Session.Secret)
+	}
+	if cfg.Session.TokenTTL != 30*time.Minute {
+		t.Errorf("Session.TokenTTL = %v, want 30m", cfg.Session.TokenTTL)
+	}
 }
 
 // TestLoadErrors 错误路径：缺文件、YAML 语法错、配置值非法，都必须报错而不是悄悄用错误的值
@@ -109,6 +124,8 @@ func TestLoadErrors(t *testing.T) {
 		{"tick zero", "game:\n  tick_hz: 0\n", "game.tick_hz"},
 		{"team size negative", "game:\n  team_size: -1\n", "game.team_size"},
 		{"bad log level", "log:\n  level: verbose\n", "log.level"},
+		{"empty session secret", "session:\n  secret: \"\"\n", "session.secret"},
+		{"zero token ttl", "session:\n  token_ttl: 0s\n", "session.token_ttl"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

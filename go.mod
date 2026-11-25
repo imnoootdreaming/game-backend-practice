@@ -4,5 +4,8 @@ module game-backend-practice
 // 项目要求的最低 Go 版本（本机 Go 1.27.4 满足）
 go 1.27
 
-// 依赖清单：本项目的第三方库。yaml.v3 负责把 configs/config.yaml 解析成 Go 结构体
-require gopkg.in/yaml.v3 v3.0.1
+// 依赖清单：yaml.v3 解析 configs/config.yaml；gorilla/websocket 支撑 1.4 WebSocket 接入层
+require (
+	github.com/gorilla/websocket v1.5.3
+	gopkg.in/yaml.v3 v3.0.1
+)

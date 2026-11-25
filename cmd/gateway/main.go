@@ -11,12 +11,14 @@ import (
 	"os/signal" // 监听操作系统信号（Ctrl+C 等）
 	"syscall"   // 定义 SIGINT / SIGTERM 等信号常量
 
-	"game-backend-practice/internal/config" // 本项目自己的配置加载包
+	"game-backend-practice/internal/config"  // 本项目自己的配置加载包
+	"game-backend-practice/internal/session" // 1.3 的 token 与会话表
+	"game-backend-practice/internal/ws"      // 1.4 的 WebSocket 接入层
 )
 
 // newHandler 创建 HTTP 请求路由器。
 // 单独抽成函数，是为了让测试能直接调用它，而不用真的启动一个服务器。
-func newHandler() http.Handler {
+func newHandler(wsServer *ws.Server) http.Handler {
 	mux := http.NewServeMux()
 	// Go 1.22+ 支持 "GET /healthz" 这种带 HTTP 方法的路由写法：
 	// 只有 GET 请求会命中，POST 等其他方法会自动返回 405（方法不允许）。
@@ -25,6 +27,8 @@ func newHandler() http.Handler {
 		// 返回一个最简单的健康检查响应：服务还活着
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	// WebSocket 升级请求走 1.4 接入层；鉴权、注册表、心跳都封装在 ws.Server 里
+	mux.Handle("GET /ws", wsServer)
 	return mux
 }
 
@@ -51,10 +55,18 @@ func main() {
 	// 设置为全局默认 logger，后面所有 slog.Info/Error 都按这个级别输出
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: &levelVar})))
 
+	// 会话管理器负责 token 签发与校验；1.5/1.7 实现后把 Router 的占位处理器换成真实大厅/房间处理器
+	sessions, err := session.NewManager([]byte(cfg.Session.Secret), cfg.Session.TokenTTL)
+	if err != nil {
+		slog.Error("create session manager failed", "err", err)
+		os.Exit(1)
+	}
+	wsServer := ws.NewServer(sessions, ws.NewRouter(nil, nil))
+
 	// 组装 HTTP 服务器：监听地址、路由、请求头超时都来自配置文件
 	srv := &http.Server{
 		Addr:              cfg.Server.Addr,
-		Handler:           newHandler(),
+		Handler:           newHandler(wsServer),
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 	}
 

@@ -12,3 +12,8 @@ log:
 game:
   tick_hz: 20                # 服务器每秒推进 20 次游戏世界（约 50ms 一帧）
   team_size: 4               # 一局游戏凑够 4 人开始
+
+# 登录会话设置
+session:
+  secret: "dev-only-change-me"  # token 签名密钥，部署时必须替换
+  token_ttl: 30m                 # token 有效期

@@ -13,9 +13,10 @@ import (
 
 // Config 是配置的根结构，对应 config.yaml 的三大块：server / log / game
 type Config struct {
-	Server ServerConfig `yaml:"server"` // 服务器监听与超时设置
-	Log    LogConfig    `yaml:"log"`    // 日志设置
-	Game   GameConfig   `yaml:"game"`   // 游戏逻辑参数
+	Server  ServerConfig  `yaml:"server"`  // 服务器监听与超时设置
+	Log     LogConfig     `yaml:"log"`     // 日志设置
+	Game    GameConfig    `yaml:"game"`    // 游戏逻辑参数
+	Session SessionConfig `yaml:"session"` // token 签发与会话有效期
 }
 
 // ServerConfig 描述 HTTP 服务的监听地址和各种超时
@@ -34,6 +35,13 @@ type LogConfig struct {
 type GameConfig struct {
 	TickHz   int `yaml:"tick_hz"`   // 每秒游戏逻辑推进次数（20 = 20Hz）
 	TeamSize int `yaml:"team_size"` // 匹配满员人数
+}
+
+// SessionConfig 描述登录 token 的 HMAC 密钥和有效期。
+// 默认值只适合本地开发，部署时必须用配置或环境变量覆盖。
+type SessionConfig struct {
+	Secret   string        `yaml:"secret"`    // HMAC-SHA256 密钥
+	TokenTTL time.Duration `yaml:"token_ttl"` // token 有效期
 }
 
 // Load 读取配置文件并做三层处理：
@@ -63,8 +71,9 @@ func defaults() Config {
 			ReadHeaderTimeout: 5 * time.Second,
 			ShutdownTimeout:   5 * time.Second,
 		},
-		Log:  LogConfig{Level: "info"},
-		Game: GameConfig{TickHz: 20, TeamSize: 4},
+		Log:     LogConfig{Level: "info"},
+		Game:    GameConfig{TickHz: 20, TeamSize: 4},
+		Session: SessionConfig{Secret: "dev-only-change-me", TokenTTL: 30 * time.Minute},
 	}
 }
 
@@ -90,6 +99,12 @@ func (c *Config) validate() error {
 	}
 	if c.Game.TeamSize <= 0 {
 		return errors.New("game.team_size must be positive")
+	}
+	if c.Session.Secret == "" {
+		return errors.New("session.secret must not be empty")
+	}
+	if c.Session.TokenTTL <= 0 {
+		return errors.New("session.token_ttl must be positive")
 	}
 	return nil
 }
