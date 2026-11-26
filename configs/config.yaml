@@ -13,6 +13,14 @@ game:
   tick_hz: 20                # 服务器每秒推进 20 次游戏世界（约 50ms 一帧）
   team_size: 4               # 一局游戏凑够 4 人开始
 
+# 匹配器设置
+match:
+  scan_interval: 500ms          # 匹配队列扫描周期；计划要求 500ms 一次
+  base_rank_tolerance: 100      # 刚入队时可接受的段位差
+  rank_widen_step: 100          # 每等满一个间隔增加的段位容差
+  rank_widen_interval: 30s      # 放宽一次的等待时长
+  room_sizes: [2, 4, 10]        # 支持的房间人数档位
+
 # 登录会话设置
 session:
   secret: "dev-only-change-me"  # token 签名密钥，部署时必须替换

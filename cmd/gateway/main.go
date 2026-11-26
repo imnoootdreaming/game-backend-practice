@@ -11,10 +11,14 @@ import (
 	"os/signal" // 监听操作系统信号（Ctrl+C 等）
 	"syscall"   // 定义 SIGINT / SIGTERM 等信号常量
 
-	"game-backend-practice/internal/config"  // 本项目自己的配置加载包
-	"game-backend-practice/internal/lobby"   // 1.5 的大厅服务（状态机 + 组队）
-	"game-backend-practice/internal/session" // 1.3 的 token 与会话表
-	"game-backend-practice/internal/ws"      // 1.4 的 WebSocket 接入层
+	"github.com/gorilla/websocket" // WebSocket 消息类型常量（二进制业务帧）
+
+	"game-backend-practice/internal/config"   // 本项目自己的配置加载包
+	"game-backend-practice/internal/lobby"    // 1.5 的大厅服务（状态机 + 组队）
+	"game-backend-practice/internal/match"    // 1.6 的匹配器与等待队列
+	"game-backend-practice/internal/protocol" // 消息定义与编解码
+	"game-backend-practice/internal/session"  // 1.3 的 token 与会话表
+	"game-backend-practice/internal/ws"       // 1.4 的 WebSocket 接入层
 )
 
 // newHandler 创建 HTTP 请求路由器。
@@ -31,6 +35,52 @@ func newHandler(wsServer *ws.Server) http.Handler {
 	// WebSocket 升级请求走 1.4 接入层；鉴权、注册表、心跳都封装在 ws.Server 里
 	mux.Handle("GET /ws", wsServer)
 	return mux
+}
+
+// newMatcher 从 gateway 配置创建匹配器；队列与成局回调由调用方注入。
+func newMatcher(cfg *config.Config, queue *match.Queue, onMatched func(match.Result) error) (*match.Matcher, error) {
+	return match.NewMatcherWithConfig(queue, cfg.MatcherConfig(), onMatched)
+}
+
+// messageSender 是连接上发送业务帧的最小能力；ws.Conn 天然满足，测试 fake 也能满足。
+type messageSender interface {
+	Send(kind int, data []byte) error
+}
+
+// onMatched 把一次匹配结果转换成状态流转与两条消息下发。
+func onMatched(manager *lobby.Manager, registry *ws.Registry, tickHz int) func(match.Result) error {
+	return func(r match.Result) error {
+		roomID := "room-" + r.MatchID
+		startFrame, err := protocol.Encode(&protocol.MatchStart{MatchID: r.MatchID, PlayerIDs: r.PlayerIDs})
+		if err != nil {
+			return err
+		}
+		assignFrame, err := protocol.Encode(&protocol.RoomAssign{RoomID: roomID, PlayerIDs: r.PlayerIDs, TickHz: tickHz})
+		if err != nil {
+			return err
+		}
+		for _, playerID := range r.PlayerIDs {
+			if err := manager.AssignRoom(playerID); err != nil {
+				return err
+			}
+			peer, ok := registry.Get(playerID)
+			if !ok {
+				// 玩家已掉线：状态仍推进，重连恢复属于 2.1 的范围。
+				continue
+			}
+			sender, ok := peer.(messageSender)
+			if !ok {
+				continue
+			}
+			if err := sender.Send(websocket.BinaryMessage, startFrame); err != nil {
+				return err
+			}
+			if err := sender.Send(websocket.BinaryMessage, assignFrame); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // main 是程序入口。启动流程依次为：
@@ -69,7 +119,26 @@ func main() {
 		slog.Error("create lobby manager failed", "err", err)
 		os.Exit(1)
 	}
-	wsServer := ws.NewServer(sessions, ws.NewRouter(lobby.NewHandler(lobbyManager), nil))
+
+	// 1.6 匹配器：成局回调需要 ws 注册表来找到在线连接，所以先建 wsServer 再建匹配器。
+	matchQueue := match.NewQueue()
+	wsServer := ws.NewServer(sessions, ws.NewRouter(lobby.NewHandlerWithMatch(lobbyManager, matchQueue), nil))
+	matcher, err := newMatcher(cfg, matchQueue, onMatched(lobbyManager, wsServer.Registry(), cfg.Game.TickHz))
+	if err != nil {
+		slog.Error("create matcher failed", "err", err)
+		os.Exit(1)
+	}
+	// 派生一个可取消的上下文：调用 cancelMatch 就能通知匹配器停下
+	matchCtx, cancelMatch := context.WithCancel(context.Background())
+	// 兜底 defer : main 返回时执行上下文取消 => 内部会关闭一个叫 Done() 的通道，所有持有 matchCtx 并在 select 里监听 <-ctx.Done() 的地方都会立刻被唤醒
+	defer cancelMatch()
+	// 匹配器放到后台协程跑，主协程继续往下启动 HTTP 服务
+	go func() {
+		// Run 会一直阻塞扫描，收到取消信号才退出；异常退出才记日志
+		if err := matcher.Run(matchCtx, cfg.Match.ScanInterval); err != nil {
+			slog.Error("matcher stopped", "err", err)
+		}
+	}()
 
 	// 组装 HTTP 服务器：监听地址、路由、请求头超时都来自配置文件
 	srv := &http.Server{
@@ -92,6 +161,9 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
+	// 收到 Ctrl+C（SIGINT）或终止信号（SIGTERM）
+	// 	=> 内部会关闭一个叫 Done() 的通道，所有持有 matchCtx 并在 select 里监听 <-ctx.Done() 的地方都会立刻被唤醒
+	cancelMatch()
 	// 优雅关闭：给现有请求最多 shutdown_timeout 秒处理完，而不是直接掐断
 	slog.Info("shutting down gateway", "timeout", cfg.Server.ShutdownTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)

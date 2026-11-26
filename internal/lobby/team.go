@@ -11,25 +11,24 @@ import (
 // teamIDBytes 是队伍 ID 的随机字节数；前缀便于日志里区分 teamID 与 playerID。
 const teamIDBytes = 8
 
-// Team 是一支队伍。Members[0] 是队长（队长退出后自动由下一位接任）；
-// Ready 只记录已准备的成员；Invited 记录已邀请但尚未接受的玩家。
+// Team 是一支队伍，类似和平精英里你开的四人小队。
+// Members[0] 是队长，队长退出后由下一位接任；Ready 记谁点了准备；Invited 记已邀请但还没同意的人。
 type Team struct {
-	ID      string          // 队伍唯一标识，由 newTeamID 生成
-	Members []string        // 成员列表，Members[0] 为队长
-	Ready   map[string]bool // 已准备的成员集合，只保留 true
-	Invited map[string]bool // 已邀请但尚未接受的玩家集合
+	ID      string          // 队伍唯一标识
+	Members []string        // 成员列表，第一个人是队长
+	Ready   map[string]bool // 已点准备的成员
+	Invited map[string]bool // 已邀请但还没接受的玩家
 }
 
-// TeamManager 用同一把锁保护队伍表和 Map<playerID, teamID> 索引，
-// 保证"一个人在同一时刻只属于一支队伍"这个不变式。
+// TeamManager 管理所有队伍，并保证一个玩家同一时间只属于一支队伍。
 type TeamManager struct {
-	mu       sync.RWMutex      // 保护 teams 与 byPlayer 的并发读写
-	teamSize int               // 队伍满员人数，超过则拒绝加入
-	teams    map[string]*Team  // Map<teamID, 队伍>
-	byPlayer map[string]string // Map<playerID, teamID>，保证一人一队
+	mu       sync.RWMutex      // 保护下面两张表的并发读写
+	teamSize int               // 队伍满员人数
+	teams    map[string]*Team  // 队伍 ID 到队伍的对应表
+	byPlayer map[string]string // 玩家 ID 到队伍 ID 的对应表
 }
 
-// NewTeamManager 构造组队管理器，teamSize 为满员人数。
+// NewTeamManager 创建队伍管理器，teamSize 是队伍满员人数。
 func NewTeamManager(teamSize int) (*TeamManager, error) {
 	if teamSize <= 0 {
 		return nil, errors.New("lobby: team size must be positive")

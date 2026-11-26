@@ -9,13 +9,16 @@ import (
 	"time"    // 超时字段的类型 time.Duration
 
 	"gopkg.in/yaml.v3" // 第三方 YAML 解析库
+
+	"game-backend-practice/internal/match" // 把配置转换成匹配器参数
 )
 
-// Config 是配置的根结构，对应 config.yaml 的三大块：server / log / game
+// Config 是配置的根结构，对应 config.yaml 的 server / log / game / match / session 五块。
 type Config struct {
 	Server  ServerConfig  `yaml:"server"`  // 服务器监听与超时设置
 	Log     LogConfig     `yaml:"log"`     // 日志设置
 	Game    GameConfig    `yaml:"game"`    // 游戏逻辑参数
+	Match   MatchConfig   `yaml:"match"`   // 匹配器参数
 	Session SessionConfig `yaml:"session"` // token 签发与会话有效期
 }
 
@@ -35,6 +38,25 @@ type LogConfig struct {
 type GameConfig struct {
 	TickHz   int `yaml:"tick_hz"`   // 每秒游戏逻辑推进次数（20 = 20Hz）
 	TeamSize int `yaml:"team_size"` // 匹配满员人数
+}
+
+// MatchConfig 描述匹配器的扫描周期和段位放宽参数。
+type MatchConfig struct {
+	ScanInterval      time.Duration `yaml:"scan_interval"`       // 匹配队列的扫描周期
+	BaseRankTolerance int           `yaml:"base_rank_tolerance"` // 初始段位容差
+	RankWidenStep     int           `yaml:"rank_widen_step"`     // 每次放宽增加的容差
+	RankWidenInterval time.Duration `yaml:"rank_widen_interval"` // 放宽一次的等待时长
+	RoomSizes         []int         `yaml:"room_sizes"`          // 支持的房间人数档位
+}
+
+// MatcherConfig 把 YAML 中的匹配参数转换成 match 包需要的配置。
+func (c Config) MatcherConfig() match.Config {
+	return match.Config{
+		TeamSize:          c.Game.TeamSize,
+		BaseRankTolerance: c.Match.BaseRankTolerance,
+		RankWidenStep:     c.Match.RankWidenStep,
+		RankWidenInterval: c.Match.RankWidenInterval,
+	}
 }
 
 // SessionConfig 描述登录 token 的 HMAC 密钥和有效期。
@@ -71,8 +93,15 @@ func defaults() Config {
 			ReadHeaderTimeout: 5 * time.Second,
 			ShutdownTimeout:   5 * time.Second,
 		},
-		Log:     LogConfig{Level: "info"},
-		Game:    GameConfig{TickHz: 20, TeamSize: 4},
+		Log:  LogConfig{Level: "info"},
+		Game: GameConfig{TickHz: 20, TeamSize: 4},
+		Match: MatchConfig{
+			ScanInterval:      500 * time.Millisecond,
+			BaseRankTolerance: 100,
+			RankWidenStep:     100,
+			RankWidenInterval: 30 * time.Second,
+			RoomSizes:         []int{2, 4, 10},
+		},
 		Session: SessionConfig{Secret: "dev-only-change-me", TokenTTL: 30 * time.Minute},
 	}
 }
@@ -99,6 +128,27 @@ func (c *Config) validate() error {
 	}
 	if c.Game.TeamSize <= 0 {
 		return errors.New("game.team_size must be positive")
+	}
+	if c.Match.ScanInterval <= 0 {
+		return errors.New("match.scan_interval must be positive")
+	}
+	if c.Match.BaseRankTolerance < 0 {
+		return errors.New("match.base_rank_tolerance must not be negative")
+	}
+	if c.Match.RankWidenStep < 0 {
+		return errors.New("match.rank_widen_step must not be negative")
+	}
+	if c.Match.RankWidenInterval <= 0 {
+		return errors.New("match.rank_widen_interval must be positive")
+	}
+	if len(c.Match.RoomSizes) == 0 {
+		return errors.New("match.room_sizes must not be empty")
+	}
+	// 逐个检查人数档位，避免 0 或负数让匹配器找不到可用的房间规格。
+	for _, size := range c.Match.RoomSizes {
+		if size <= 0 {
+			return errors.New("match.room_sizes must contain positive values")
+		}
 	}
 	if c.Session.Secret == "" {
 		return errors.New("session.secret must not be empty")

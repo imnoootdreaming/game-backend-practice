@@ -204,6 +204,8 @@ func (c *Conn) readPump() {
 					slog.Warn("ws decode failed", "player", c.playerID, "err", err)
 					return
 				}
+				// 读泵只调 Route 这一个固定入口；消息最终由大厅、房间还是兜底 Handler 处理，
+				// 由 Router 内部的接口变量在运行期决定——连接层因此与业务实现解耦。
 				if err := c.router.Route(context.Background(), c, msg); err != nil {
 					slog.Error("ws route failed", "player", c.playerID, "type", msg.Type(), "err", err)
 					return

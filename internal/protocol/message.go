@@ -86,6 +86,7 @@ func (LoginResp) Type() string { return TypeLoginResp }
 type ReadyReq struct {
 	PlayerID string `json:"player_id"` // 请求玩家（服务端以连接身份为准，不信任此字段）
 	Ready    bool   `json:"ready"`     // true 准备，false 取消准备
+	Rank     int    `json:"rank"`      // 玩家段位分，匹配时用于分桶
 }
 
 func (ReadyReq) Type() string { return TypeReadyReq }

@@ -6,15 +6,15 @@ import (
 	"sync"
 )
 
-// Manager 把玩家状态机与组队管理组合在一起，是 1.5 对外的主入口。
-// players 只保存已登录过的玩家状态；StateOf 对未知玩家返回 Offline。
+// Manager 管理大厅里的玩家状态：谁在线、谁准备了、谁在排队、谁进了房间。
+// 可以把它想成和平精英大厅背后的“玩家状态台账”：Login、SetReady、EnterMatching 这些方法就是在这本台账上改状态。
 type Manager struct {
 	mu      sync.RWMutex     // 保护 players 的并发读写
-	players map[string]State // Map<playerID, 当前状态>，未登录的用户不包含在该映射中
-	teams   *TeamManager     // 组队子模块， 处理建队/邀请/准备
+	players map[string]State // 玩家 ID 到当前状态的对应表，没登录过的人不在表里
+	teams   *TeamManager     // 队伍管理，负责建队、邀请、准备
 }
 
-// NewManager 构造大厅管理器；teamSize 非法时拒绝启动。
+// NewManager 创建大厅管理器；teamSize 非法时直接报错，不让服务带错配置启动。
 func NewManager(teamSize int) (*Manager, error) {
 	teams, err := NewTeamManager(teamSize)
 	if err != nil {
@@ -26,7 +26,7 @@ func NewManager(teamSize int) (*Manager, error) {
 	}, nil
 }
 
-// Teams 暴露组队管理器给 handler，避免在 Manager 上再包一层相同签名的方法。
+// Teams 把队伍管理器交出去，方便 handler 直接调用建队、邀请等方法。
 func (m *Manager) Teams() *TeamManager { return m.teams }
 
 // StateOf 返回玩家当前状态；从未登录的玩家视为 Offline。
@@ -99,12 +99,12 @@ func (m *Manager) SetReady(playerID string, ready bool) error {
 	return m.teams.SetReady(playerID, ready)
 }
 
-// EnterMatching 让玩家进入匹配队列（1.6 会在匹配成功后调用 AssignRoom）。
+// EnterMatching 把玩家状态改成“匹配中”，表示他开始排队。
 func (m *Manager) EnterMatching(playerID string) error {
 	return m.changeState(playerID, Matching)
 }
 
-// AssignRoom 表示匹配成功，玩家进入房间。
+// AssignRoom 表示匹配成功，玩家进入房间，状态改成“战斗中”。
 func (m *Manager) AssignRoom(playerID string) error {
 	return m.changeState(playerID, InRoom)
 }

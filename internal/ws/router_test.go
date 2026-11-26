@@ -11,6 +11,7 @@ import (
 )
 
 // recordingHandler 记录被路由过来的消息类型，用来断言"分发到了正确的处理器"
+// 多态测试桩：它和 *lobby.Handler 没有任何继承关系，只因实现了 Handle 就能当 Handler 用。
 type recordingHandler struct {
 	mu   sync.Mutex
 	got  []string
@@ -37,6 +38,8 @@ func (unknownMessage) Type() string { return "Unknown" }
 
 // TestRouterDispatch 正常路径：大厅类消息给 lobby，战斗类消息给 room，其余给 fallback
 func TestRouterDispatch(t *testing.T) {
+	// 三个测试桩以 Handler 接口类型传入 Router：同一个接口，不同实例，
+	// 路由后各自记录属于自己的消息，用来验证接口调用分派到了正确的实现。
 	lobby := &recordingHandler{}
 	room := &recordingHandler{}
 	fallback := &recordingHandler{}

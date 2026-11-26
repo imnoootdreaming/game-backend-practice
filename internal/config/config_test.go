@@ -3,9 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"game-backend-practice/internal/match"
 )
 
 // writeConfig 是测试辅助函数：在临时目录里写一份配置文件，测试结束自动清理，不污染项目目录
@@ -30,6 +33,12 @@ log:
 game:
   tick_hz: 30
   team_size: 10
+match:
+  scan_interval: 250ms
+  base_rank_tolerance: 50
+  rank_widen_step: 20
+  rank_widen_interval: 15s
+  room_sizes: [2, 4, 8]
 session:
   secret: "unit-secret"
   token_ttl: 45m
@@ -62,6 +71,22 @@ session:
 	}
 	if cfg.Session.TokenTTL != 45*time.Minute {
 		t.Errorf("Session.TokenTTL = %v, want 45m", cfg.Session.TokenTTL)
+	}
+	if cfg.Match.ScanInterval != 250*time.Millisecond {
+		t.Errorf("Match.ScanInterval = %v, want 250ms", cfg.Match.ScanInterval)
+	}
+	if cfg.Match.BaseRankTolerance != 50 {
+		t.Errorf("Match.BaseRankTolerance = %d, want 50", cfg.Match.BaseRankTolerance)
+	}
+	if cfg.Match.RankWidenStep != 20 {
+		t.Errorf("Match.RankWidenStep = %d, want 20", cfg.Match.RankWidenStep)
+	}
+	if cfg.Match.RankWidenInterval != 15*time.Second {
+		t.Errorf("Match.RankWidenInterval = %v, want 15s", cfg.Match.RankWidenInterval)
+	}
+	wantRoomSizes := []int{2, 4, 8}
+	if !reflect.DeepEqual(cfg.Match.RoomSizes, wantRoomSizes) {
+		t.Errorf("Match.RoomSizes = %v, want %v", cfg.Match.RoomSizes, wantRoomSizes)
 	}
 }
 
@@ -97,6 +122,22 @@ func TestLoadAppliesDefaultsForMissingFields(t *testing.T) {
 	if cfg.Session.TokenTTL != 30*time.Minute {
 		t.Errorf("Session.TokenTTL = %v, want 30m", cfg.Session.TokenTTL)
 	}
+	if cfg.Match.ScanInterval != 500*time.Millisecond {
+		t.Errorf("Match.ScanInterval = %v, want 500ms", cfg.Match.ScanInterval)
+	}
+	if cfg.Match.BaseRankTolerance != 100 {
+		t.Errorf("Match.BaseRankTolerance = %d, want 100", cfg.Match.BaseRankTolerance)
+	}
+	if cfg.Match.RankWidenStep != 100 {
+		t.Errorf("Match.RankWidenStep = %d, want 100", cfg.Match.RankWidenStep)
+	}
+	if cfg.Match.RankWidenInterval != 30*time.Second {
+		t.Errorf("Match.RankWidenInterval = %v, want 30s", cfg.Match.RankWidenInterval)
+	}
+	wantRoomSizes := []int{2, 4, 10}
+	if !reflect.DeepEqual(cfg.Match.RoomSizes, wantRoomSizes) {
+		t.Errorf("Match.RoomSizes = %v, want %v", cfg.Match.RoomSizes, wantRoomSizes)
+	}
 }
 
 // TestLoadErrors 错误路径：缺文件、YAML 语法错、配置值非法，都必须报错而不是悄悄用错误的值
@@ -116,9 +157,9 @@ func TestLoadErrors(t *testing.T) {
 
 	// 表驱动测试：一行一个非法场景，统一断言错误信息里包含预期的字段名
 	tests := []struct {
-		name    string
-		yaml    string
-		wantErr string
+		name    string // 用例名
+		yaml    string // YAML 内容
+		wantErr string // 期望错误信息片段
 	}{
 		{"empty addr", "server:\n  addr: \"\"\n", "server.addr"},
 		{"tick zero", "game:\n  tick_hz: 0\n", "game.tick_hz"},
@@ -126,6 +167,12 @@ func TestLoadErrors(t *testing.T) {
 		{"bad log level", "log:\n  level: verbose\n", "log.level"},
 		{"empty session secret", "session:\n  secret: \"\"\n", "session.secret"},
 		{"zero token ttl", "session:\n  token_ttl: 0s\n", "session.token_ttl"},
+		{"zero scan interval", "match:\n  scan_interval: 0s\n", "match.scan_interval"},
+		{"negative base tolerance", "match:\n  base_rank_tolerance: -1\n", "match.base_rank_tolerance"},
+		{"negative rank widen step", "match:\n  rank_widen_step: -1\n", "match.rank_widen_step"},
+		{"zero rank widen interval", "match:\n  rank_widen_interval: 0s\n", "match.rank_widen_interval"},
+		{"empty room sizes", "match:\n  room_sizes: []\n", "match.room_sizes"},
+		{"invalid room size", "match:\n  room_sizes: [2, 0]\n", "match.room_sizes"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,5 +182,26 @@ func TestLoadErrors(t *testing.T) {
 				t.Fatalf("Load() error = %v, want containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestConfigMatcherConfig(t *testing.T) {
+	cfg := Config{
+		Game: GameConfig{TeamSize: 4},
+		Match: MatchConfig{
+			BaseRankTolerance: 50,
+			RankWidenStep:     20,
+			RankWidenInterval: 15 * time.Second,
+		},
+	}
+	got := cfg.MatcherConfig()
+	want := match.Config{
+		TeamSize:          4,
+		BaseRankTolerance: 50,
+		RankWidenStep:     20,
+		RankWidenInterval: 15 * time.Second,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("MatcherConfig() = %+v, want %+v", got, want)
 	}
 }

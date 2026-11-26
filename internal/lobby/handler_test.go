@@ -3,6 +3,7 @@ package lobby
 import (
 	"testing"
 
+	"game-backend-practice/internal/match"
 	"game-backend-practice/internal/protocol"
 )
 
@@ -62,6 +63,144 @@ func TestHandlerIgnoresNonLobbyMessages(t *testing.T) {
 	for _, msg := range []protocol.Message{nil, &protocol.LoginResp{}, &protocol.InputCmd{}, &protocol.Snapshot{}} {
 		if err := h.handle("p1", msg); err != nil {
 			t.Errorf("handle(%v) = %v, want nil", msg, err)
+		}
+	}
+}
+
+func TestHandlerReadyEnqueuesPlayer(t *testing.T) {
+	m := newTestManager(t, 4)
+	q := match.NewQueue()
+	h := NewHandlerWithMatch(m, q)
+	if err := h.handle("p1", &protocol.LoginReq{}); err != nil {
+		t.Fatalf("LoginReq: %v", err)
+	}
+	if err := h.handle("p1", &protocol.ReadyReq{Ready: true, Rank: 1200}); err != nil {
+		t.Fatalf("ReadyReq: %v", err)
+	}
+	if got := m.StateOf("p1"); got != Matching {
+		t.Fatalf("state = %s, want Matching", got)
+	}
+	e, ok := q.Get("p1")
+	if !ok {
+		t.Fatal("player p1 not enqueued")
+	}
+	if e.Rank != 1200 || e.PartyID != "p1" || e.PartySize != 1 || e.EnqueuedAt.IsZero() {
+		t.Fatalf("entry = %+v, want rank=1200 party=p1 size=1 non-zero time", e)
+	}
+}
+
+func TestHandlerCancelReadyRemovesFromQueue(t *testing.T) {
+	m := newTestManager(t, 4)
+	q := match.NewQueue()
+	h := NewHandlerWithMatch(m, q)
+	if err := h.handle("p1", &protocol.LoginReq{}); err != nil {
+		t.Fatalf("LoginReq: %v", err)
+	}
+	if err := h.handle("p1", &protocol.ReadyReq{Ready: true, Rank: 1200}); err != nil {
+		t.Fatalf("ReadyReq: %v", err)
+	}
+	if err := h.handle("p1", &protocol.ReadyReq{Ready: false}); err != nil {
+		t.Fatalf("cancel ReadyReq: %v", err)
+	}
+	if got := m.StateOf("p1"); got != Lobby {
+		t.Fatalf("state = %s, want Lobby", got)
+	}
+	if _, ok := q.Get("p1"); ok {
+		t.Fatal("player p1 still in match queue after cancel ready")
+	}
+}
+
+func TestHandlerReadyRejectsNegativeRank(t *testing.T) {
+	m := newTestManager(t, 4)
+	q := match.NewQueue()
+	h := NewHandlerWithMatch(m, q)
+	if err := h.handle("p1", &protocol.LoginReq{}); err != nil {
+		t.Fatalf("LoginReq: %v", err)
+	}
+	if err := h.handle("p1", &protocol.ReadyReq{Ready: true, Rank: -1}); err == nil {
+		t.Fatal("ReadyReq with negative rank error = nil, want non-nil")
+	}
+	if q.Len() != 0 {
+		t.Fatalf("queue length = %d, want 0", q.Len())
+	}
+}
+
+func newTeamForTest(t *testing.T, m *Manager) (*Team, *match.Queue, *Handler) {
+	t.Helper()
+	q := match.NewQueue()
+	h := NewHandlerWithMatch(m, q)
+	for _, id := range []string{"leader", "guest"} {
+		if err := m.Login(id); err != nil {
+			t.Fatalf("Login(%s): %v", id, err)
+		}
+	}
+	team, err := m.CreateTeam("leader")
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if err := m.Invite("leader", "guest"); err != nil {
+		t.Fatalf("Invite: %v", err)
+	}
+	if err := m.Accept("guest", team.ID); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	return team, q, h
+}
+
+func TestHandlerReadyEnqueuesWholeTeam(t *testing.T) {
+	m := newTestManager(t, 4)
+	team, q, h := newTeamForTest(t, m)
+
+	// 第一个人准备时队友还没准备，应该被拒绝，不产生排队记录。
+	if err := h.handle("leader", &protocol.ReadyReq{Ready: true, Rank: 1200}); err == nil {
+		t.Fatal("leader ready before guest error = nil, want non-nil")
+	}
+	if q.Len() != 0 {
+		t.Fatalf("queue length = %d, want 0 before all ready", q.Len())
+	}
+
+	if err := h.handle("guest", &protocol.ReadyReq{Ready: true, Rank: 1300}); err != nil {
+		t.Fatalf("guest ready: %v", err)
+	}
+	if q.Len() != 2 {
+		t.Fatalf("queue length = %d, want 2", q.Len())
+	}
+	for _, id := range []string{"leader", "guest"} {
+		e, ok := q.Get(id)
+		if !ok {
+			t.Fatalf("player %s not enqueued", id)
+		}
+		if e.PartyID != team.ID || e.PartySize != 2 || e.Rank != 1300 {
+			t.Fatalf("entry[%s] = %+v, want party=%s size=2 rank=1300", id, e, team.ID)
+		}
+		if got := m.StateOf(id); got != Matching {
+			t.Fatalf("state[%s] = %s, want Matching", id, got)
+		}
+	}
+}
+
+func TestHandlerCancelReadyRemovesWholeTeam(t *testing.T) {
+	m := newTestManager(t, 4)
+	_, q, h := newTeamForTest(t, m)
+
+	// leader 先准备会因为 guest 未准备而报错；guest 准备后才真正整队入队。
+	_ = h.handle("leader", &protocol.ReadyReq{Ready: true, Rank: 1200})
+	if err := h.handle("guest", &protocol.ReadyReq{Ready: true, Rank: 1300}); err != nil {
+		t.Fatalf("guest ready: %v", err)
+	}
+	if q.Len() != 2 {
+		t.Fatalf("queue length = %d, want 2 after all ready", q.Len())
+	}
+
+	if err := h.handle("guest", &protocol.ReadyReq{Ready: false}); err != nil {
+		t.Fatalf("cancel ready: %v", err)
+	}
+	if q.Len() != 0 {
+		t.Fatalf("queue length = %d, want 0 after cancel", q.Len())
+	}
+	for _, id := range []string{"leader", "guest"} {
+		if got := m.StateOf(id); got != Lobby {
+			t.Fatalf("state[%s] = %s, want Lobby", id, got)
 		}
 	}
 }
