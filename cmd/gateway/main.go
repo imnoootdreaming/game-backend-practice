@@ -10,6 +10,7 @@ import (
 	"os"        // 访问标准输出、退出程序
 	"os/signal" // 监听操作系统信号（Ctrl+C 等）
 	"syscall"   // 定义 SIGINT / SIGTERM 等信号常量
+	"time"      // 由 tickHz 计算 ticker 间隔
 
 	"github.com/gorilla/websocket" // WebSocket 消息类型常量（二进制业务帧）
 
@@ -17,6 +18,7 @@ import (
 	"game-backend-practice/internal/lobby"    // 1.5 的大厅服务（状态机 + 组队）
 	"game-backend-practice/internal/match"    // 1.6 的匹配器与等待队列
 	"game-backend-practice/internal/protocol" // 消息定义与编解码
+	"game-backend-practice/internal/room"     // 1.7 的房间注册表
 	"game-backend-practice/internal/session"  // 1.3 的 token 与会话表
 	"game-backend-practice/internal/ws"       // 1.4 的 WebSocket 接入层
 )
@@ -47,10 +49,53 @@ type messageSender interface {
 	Send(kind int, data []byte) error
 }
 
-// onMatched 把一次匹配结果转换成状态流转与两条消息下发。
-func onMatched(manager *lobby.Manager, registry *ws.Registry, tickHz int) func(match.Result) error {
+// broadcastSnapshot 把一帧权威快照编码后发给快照中列出的在线玩家。
+func broadcastSnapshot(registry *ws.Registry, snap *protocol.Snapshot) error {
+	frame, err := protocol.Encode(snap)
+	if err != nil {
+		return err
+	}
+	for _, state := range snap.Players {
+		// 只发给本房间玩家；重连恢复属于 2.1，这里先跳过掉线连接。
+		peer, ok := registry.Get(state.ID)
+		if !ok {
+			continue
+		}
+		sender, ok := peer.(messageSender)
+		if !ok {
+			continue
+		}
+		if err := sender.Send(websocket.BinaryMessage, frame); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// onMatched 把一次匹配结果转换成房间创建、tick 启动、快照广播、状态流转与两条消息下发。
+func onMatched(ctx context.Context, manager *lobby.Manager, registry *ws.Registry, rooms *room.Manager, tickHz int) func(match.Result) error {
 	return func(r match.Result) error {
+		if tickHz <= 0 {
+			return errors.New("room: tick hz must be positive")
+		}
 		roomID := "room-" + r.MatchID
+		// 先建房间再通知玩家，避免客户端收到 RoomAssign 后找不到对应权威状态。
+		created, err := rooms.Create(roomID, r.PlayerIDs)
+		if err != nil {
+			return err
+		}
+		// 每帧快照广播给房间玩家；广播失败只记日志，不让单个连接拖垮整个房间 tick。
+		created.SetSnapshotSink(func(s *protocol.Snapshot) {
+			if err := broadcastSnapshot(registry, s); err != nil {
+				slog.Error("broadcast snapshot failed", "room", roomID, "err", err)
+			}
+		})
+		// 成局即启动权威时钟；ctx 取消时房间 ticker 随之停止。
+		go func() {
+			if err := created.Run(ctx, time.Second/time.Duration(tickHz)); err != nil {
+				slog.Error("room ticker stopped", "room", roomID, "err", err)
+			}
+		}()
 		startFrame, err := protocol.Encode(&protocol.MatchStart{MatchID: r.MatchID, PlayerIDs: r.PlayerIDs})
 		if err != nil {
 			return err
@@ -106,7 +151,7 @@ func main() {
 	// 设置为全局默认 logger，后面所有 slog.Info/Error 都按这个级别输出
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: &levelVar})))
 
-	// 会话管理器负责 token 签发与校验
+	// 会话管理器 : 玩家账号登录成功后拿到登录态票据。后续进大厅、重连、进房间都要证明“我是这个玩家”
 	sessions, err := session.NewManager([]byte(cfg.Session.Secret), cfg.Session.TokenTTL)
 	if err != nil {
 		slog.Error("create session manager failed", "err", err)
@@ -120,18 +165,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1.6 匹配器：成局回调需要 ws 注册表来找到在线连接，所以先建 wsServer 再建匹配器。
+	// 1.6 匹配器：成局回调需要 ws 注册表、房间注册表和可取消上下文，所以先建好依赖再建匹配器。
 	matchQueue := match.NewQueue()
-	wsServer := ws.NewServer(sessions, ws.NewRouter(lobby.NewHandlerWithMatch(lobbyManager, matchQueue), nil))
-	matcher, err := newMatcher(cfg, matchQueue, onMatched(lobbyManager, wsServer.Registry(), cfg.Game.TickHz))
+	roomManager := room.NewManager()
+	wsServer := ws.NewServer(sessions, ws.NewRouter(
+		lobby.NewHandlerWithMatch(lobbyManager, matchQueue),
+		room.NewHandler(roomManager),
+	))
+	// 派生一个可取消的上下文：调用 cancelMatch 就能通知匹配器与房间 ticker 停下
+	matchCtx, cancelMatch := context.WithCancel(context.Background())
+	// 兜底 defer : main 返回时执行上下文取消 => 内部会关闭一个叫 Done() 的通道，所有持有 matchCtx 并在 select 里监听 <-ctx.Done() 的地方都会立刻被唤醒
+	defer cancelMatch()
+	matcher, err := newMatcher(cfg, matchQueue, onMatched(matchCtx, lobbyManager, wsServer.Registry(), roomManager, cfg.Game.TickHz))
 	if err != nil {
 		slog.Error("create matcher failed", "err", err)
 		os.Exit(1)
 	}
-	// 派生一个可取消的上下文：调用 cancelMatch 就能通知匹配器停下
-	matchCtx, cancelMatch := context.WithCancel(context.Background())
-	// 兜底 defer : main 返回时执行上下文取消 => 内部会关闭一个叫 Done() 的通道，所有持有 matchCtx 并在 select 里监听 <-ctx.Done() 的地方都会立刻被唤醒
-	defer cancelMatch()
 	// 匹配器放到后台协程跑，主协程继续往下启动 HTTP 服务
 	go func() {
 		// Run 会一直阻塞扫描，收到取消信号才退出；异常退出才记日志

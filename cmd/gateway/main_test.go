@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest" // 测试专用：在内存里模拟 HTTP 请求和响应，不用真开端口
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"game-backend-practice/internal/lobby"
 	"game-backend-practice/internal/match"
 	"game-backend-practice/internal/protocol"
+	"game-backend-practice/internal/room"
 	"game-backend-practice/internal/session"
 	"game-backend-practice/internal/ws"
 )
@@ -150,17 +153,34 @@ func TestNewMatcherUsesGatewayConfig(t *testing.T) {
 
 // fakeSendPeer 是测试用的在线连接，记录收到的业务帧，便于断言消息内容。
 type fakeSendPeer struct {
-	id     string   // 玩家 ID
-	frames [][]byte // 收到的业务帧
-	kinds  []int    // 每条帧对应的 WebSocket 消息类型
+	mu     sync.Mutex // 保护 frames 与 kinds 的并发读写
+	id     string     // 玩家 ID
+	frames [][]byte   // 收到的业务帧
+	kinds  []int      // 每条帧对应的 WebSocket 消息类型
 }
 
 func (p *fakeSendPeer) ID() string   { return p.id }
 func (p *fakeSendPeer) Close() error { return nil }
 func (p *fakeSendPeer) Send(kind int, data []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.kinds = append(p.kinds, kind)
 	p.frames = append(p.frames, append([]byte(nil), data...))
 	return nil
+}
+
+// Frames 返回已收到业务帧的副本，供测试安全读取。
+func (p *fakeSendPeer) Frames() [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([][]byte(nil), p.frames...)
+}
+
+// Kinds 返回已收到帧类型的副本，供测试安全读取。
+func (p *fakeSendPeer) Kinds() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.kinds...)
 }
 
 func TestOnMatchedAssignsRoomAndSendsMessages(t *testing.T) {
@@ -169,6 +189,7 @@ func TestOnMatchedAssignsRoomAndSendsMessages(t *testing.T) {
 		t.Fatalf("lobby.NewManager() error = %v", err)
 	}
 	registry := ws.NewRegistry()
+	rooms := room.NewManager()
 	peers := make(map[string]*fakeSendPeer)
 	for _, id := range []string{"p1", "p2"} {
 		if err := m.Login(id); err != nil {
@@ -184,22 +205,33 @@ func TestOnMatchedAssignsRoomAndSendsMessages(t *testing.T) {
 		peers[id] = peer
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	result := match.Result{MatchID: "match-1", PlayerIDs: []string{"p1", "p2"}}
-	if err := onMatched(m, registry, 20)(result); err != nil {
+	if err := onMatched(ctx, m, registry, rooms, 20)(result); err != nil {
 		t.Fatalf("onMatched() error = %v", err)
+	}
+	created, ok := rooms.Get("room-match-1")
+	if !ok {
+		t.Fatal("room room-match-1 not created")
+	}
+	if len(created.Players) != 2 {
+		t.Fatalf("len(room.Players) = %d, want 2", len(created.Players))
 	}
 	for _, id := range []string{"p1", "p2"} {
 		if got := m.StateOf(id); got != lobby.InRoom {
 			t.Fatalf("state[%s] = %s, want InRoom", id, got)
 		}
 		peer := peers[id]
-		if len(peer.frames) != 2 {
-			t.Fatalf("frames[%s] = %d, want 2", id, len(peer.frames))
+		frames := peer.Frames()
+		kinds := peer.Kinds()
+		if len(frames) < 2 {
+			t.Fatalf("frames[%s] = %d, want at least 2", id, len(frames))
 		}
-		if peer.kinds[0] != websocket.BinaryMessage || peer.kinds[1] != websocket.BinaryMessage {
-			t.Fatalf("kinds[%s] = %v, want binary frames", id, peer.kinds)
+		if kinds[0] != websocket.BinaryMessage || kinds[1] != websocket.BinaryMessage {
+			t.Fatalf("kinds[%s] = %v, want binary frames", id, kinds)
 		}
-		startMsg, err := protocol.Decode(peer.frames[0])
+		startMsg, err := protocol.Decode(frames[0])
 		if err != nil {
 			t.Fatalf("decode MatchStart[%s]: %v", id, err)
 		}
@@ -207,7 +239,7 @@ func TestOnMatchedAssignsRoomAndSendsMessages(t *testing.T) {
 		if !ok || start.MatchID != "match-1" || len(start.PlayerIDs) != 2 {
 			t.Fatalf("MatchStart[%s] = %+v, want match-1 with 2 players", id, startMsg)
 		}
-		assignMsg, err := protocol.Decode(peer.frames[1])
+		assignMsg, err := protocol.Decode(frames[1])
 		if err != nil {
 			t.Fatalf("decode RoomAssign[%s]: %v", id, err)
 		}
@@ -231,7 +263,134 @@ func TestOnMatchedRejectsInvalidState(t *testing.T) {
 		t.Fatalf("registry.Add(p1): %v", err)
 	}
 	result := match.Result{MatchID: "match-1", PlayerIDs: []string{"p1"}}
-	if err := onMatched(m, registry, 20)(result); err == nil {
+	if err := onMatched(context.Background(), m, registry, room.NewManager(), 20)(result); err == nil {
 		t.Fatal("onMatched() error = nil, want invalid transition error")
+	}
+}
+
+func TestOnMatchedRejectsDuplicateRoom(t *testing.T) {
+	m, err := lobby.NewManager(4)
+	if err != nil {
+		t.Fatalf("lobby.NewManager() error = %v", err)
+	}
+	if err := m.Login("p1"); err != nil {
+		t.Fatalf("Login(p1): %v", err)
+	}
+	if err := m.EnterMatching("p1"); err != nil {
+		t.Fatalf("EnterMatching(p1): %v", err)
+	}
+	rooms := room.NewManager()
+	if _, err := rooms.Create("room-match-1", []string{"other"}); err != nil {
+		t.Fatalf("pre-create room: %v", err)
+	}
+	result := match.Result{MatchID: "match-1", PlayerIDs: []string{"p1"}}
+	if err := onMatched(context.Background(), m, ws.NewRegistry(), rooms, 20)(result); err == nil {
+		t.Fatal("onMatched() error = nil, want duplicate room error")
+	}
+}
+
+func TestOnMatchedStartsRoomTicker(t *testing.T) {
+	m, err := lobby.NewManager(4)
+	if err != nil {
+		t.Fatalf("lobby.NewManager() error = %v", err)
+	}
+	if err := m.Login("p1"); err != nil {
+		t.Fatalf("Login(p1): %v", err)
+	}
+	if err := m.EnterMatching("p1"); err != nil {
+		t.Fatalf("EnterMatching(p1): %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rooms := room.NewManager()
+	result := match.Result{MatchID: "match-1", PlayerIDs: []string{"p1"}}
+	if err := onMatched(ctx, m, ws.NewRegistry(), rooms, 1000)(result); err != nil {
+		t.Fatalf("onMatched() error = %v", err)
+	}
+	created, ok := rooms.Get("room-match-1")
+	if !ok {
+		t.Fatal("room room-match-1 not created")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if created.CurrentTick() >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := created.CurrentTick(); got < 2 {
+		t.Fatalf("room tick = %d, want at least 2", got)
+	}
+}
+
+func TestOnMatchedRejectsNonPositiveTickHz(t *testing.T) {
+	m, err := lobby.NewManager(4)
+	if err != nil {
+		t.Fatalf("lobby.NewManager() error = %v", err)
+	}
+	if err := m.Login("p1"); err != nil {
+		t.Fatalf("Login(p1): %v", err)
+	}
+	if err := m.EnterMatching("p1"); err != nil {
+		t.Fatalf("EnterMatching(p1): %v", err)
+	}
+	rooms := room.NewManager()
+	result := match.Result{MatchID: "match-1", PlayerIDs: []string{"p1"}}
+	if err := onMatched(context.Background(), m, ws.NewRegistry(), rooms, 0)(result); err == nil {
+		t.Fatal("onMatched() error = nil, want invalid tickHz error")
+	}
+	if _, ok := rooms.Get("room-match-1"); ok {
+		t.Fatal("room created despite invalid tickHz")
+	}
+}
+
+func TestOnMatchedBroadcastsSnapshot(t *testing.T) {
+	m, err := lobby.NewManager(4)
+	if err != nil {
+		t.Fatalf("lobby.NewManager() error = %v", err)
+	}
+	registry := ws.NewRegistry()
+	peers := make(map[string]*fakeSendPeer)
+	for _, id := range []string{"p1", "p2"} {
+		if err := m.Login(id); err != nil {
+			t.Fatalf("Login(%s): %v", id, err)
+		}
+		if err := m.EnterMatching(id); err != nil {
+			t.Fatalf("EnterMatching(%s): %v", id, err)
+		}
+		peer := &fakeSendPeer{id: id}
+		if err := registry.Add(peer); err != nil {
+			t.Fatalf("registry.Add(%s): %v", id, err)
+		}
+		peers[id] = peer
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rooms := room.NewManager()
+	result := match.Result{MatchID: "match-1", PlayerIDs: []string{"p1", "p2"}}
+	if err := onMatched(ctx, m, registry, rooms, 1000)(result); err != nil {
+		t.Fatalf("onMatched() error = %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(peers["p1"].Frames()) >= 3 && len(peers["p2"].Frames()) >= 3 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for _, id := range []string{"p1", "p2"} {
+		frames := peers[id].Frames()
+		if len(frames) < 3 {
+			t.Fatalf("frames[%s] = %d, want at least 3", id, len(frames))
+		}
+		msg, err := protocol.Decode(frames[2])
+		if err != nil {
+			t.Fatalf("decode Snapshot[%s]: %v", id, err)
+		}
+		snap, ok := msg.(*protocol.Snapshot)
+		if !ok || snap.RoomID != "room-match-1" || snap.Tick < 1 || len(snap.Players) != 2 {
+			t.Fatalf("Snapshot[%s] = %+v, want room-match-1 tick>=1 with 2 players", id, msg)
+		}
 	}
 }
